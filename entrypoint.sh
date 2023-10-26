@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # 设置各变量
-WSPATH=${WSPATH:-'argo'}  # WS 路径前缀。(注意:伪装路径不需要 / 符号开始,为避免不必要的麻烦,请不要使用特殊符号.)
+WSPATH=${WSPATH:-'glitch'}  # WS 路径前缀。(注意:伪装路径不需要 / 符号开始,为避免不必要的麻烦,请不要使用特殊符号.)
 UUID=${UUID:-'de04add9-5c68-8bab-950c-08cd5320df18'}
 WEB_USERNAME=${WEB_USERNAME:-'admin'}
 WEB_PASSWORD=${WEB_PASSWORD:-'password'}
@@ -199,17 +199,23 @@ generate_config() {
             "tag":"WARP",
             "protocol":"wireguard",
             "settings":{
-                "secretKey":"cKE7LmCF61IhqqABGhvJ44jWXp8fKymcMAEVAzbDF2k=",
+                "secretKey":"YFYOAdbw1bKTHlNNi+aEjBM3BO7unuFC5rOkMRAz9XY=",
                 "address":[
                     "172.16.0.2/32",
-                    "fd01:5ca1:ab1e:823e:e094:eb1c:ff87:1fab/128"
+                    "2606:4700:110:8a36:df92:102a:9602:fa18/128"
                 ],
                 "peers":[
                     {
                         "publicKey":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                        "allowedIPs":[
+                            "0.0.0.0/0",
+                            "::/0"
+                        ],
                         "endpoint":"162.159.193.10:2408"
                     }
-                ]
+                ],
+                "reserved":[78, 135, 76],
+                "mtu":1280
             }
         }
     ],
@@ -250,7 +256,7 @@ run() {
       cat > tunnel.yml << EOF
 tunnel: \$(sed "s@.*TunnelID:\(.*\)}@\1@g" <<< "\$ARGO_AUTH")
 credentials-file: /app/tunnel.json
-protocol: h2mux
+protocol: http2
 
 ingress:
   - hostname: \$ARGO_DOMAIN
@@ -260,17 +266,21 @@ EOF
   - hostname: \$SSH_DOMAIN
     service: http://localhost:2222
 EOF
+    [ -n "\${FTP_DOMAIN}" ] && cat >> tunnel.yml << EOF
+  - hostname: \$FTP_DOMAIN
+    service: http://localhost:3333
+EOF
       cat >> tunnel.yml << EOF
     originRequest:
       noTLSVerify: true
   - service: http_status:404
 EOF
       nohup ./cloudflared tunnel --edge-ip-version auto --config tunnel.yml run 2>/dev/null 2>&1 &
-    elif [[ \$ARGO_AUTH =~ ^[A-Z0-9a-z=]{120,250}$ ]]; then
-      nohup ./cloudflared tunnel --edge-ip-version auto --protocol h2mux run --token ${ARGO_AUTH} 2>/dev/nul 2>&1 &
+    elif [[ "\$ARGO_AUTH" =~ ^[A-Z0-9a-z=]{120,250}$ ]]; then
+      nohup ./cloudflared tunnel --edge-ip-version auto --protocol http2 run --token ${ARGO_AUTH} 2>/dev/null 2>&1 &
     fi
   else
-    nohup ./cloudflared tunnel --edge-ip-version auto --protocol h2mux --no-autoupdate --url http://localhost:8080 2>/dev/nul 2>&1 &
+    nohup ./cloudflared tunnel --edge-ip-version auto --protocol http2 --no-autoupdate --url http://localhost:8080 2>/dev/null 2>&1 &
     sleep 5
     local LOCALHOST=\$(ss -nltp | grep '"cloudflared"' | awk '{print \$4}')
     ARGO_DOMAIN=\$(wget -qO- http://\$LOCALHOST/quicktunnel | cut -d\" -f4)
@@ -345,8 +355,8 @@ check_variable() {
 # 下载最新版本 Nezha Agent
 download_agent() {
   if [ ! -e nezha-agent ]; then
-    URL=\$(wget -qO- -4 "https://api.github.com/repos/naiba/nezha/releases/latest" | grep -o "https.*linux_amd64.zip")
-    URL=\${URL:-https://github.com/naiba/nezha/releases/download/v0.14.11/nezha-agent_linux_amd64.zip}
+    URL=\$(wget -qO- "https://api.github.com/repos/nezhahq/agent/releases/latest" | grep -o "https.*linux_amd64.zip")
+    URL=\${URL:-https://github.com/nezhahq/agent/releases/download/v0.15.6/nezha-agent_linux_amd64.zip}
     wget \${URL}
     unzip -qod ./ nezha-agent_linux_amd64.zip && rm -f nezha-agent_linux_amd64.zip
   fi
@@ -400,11 +410,64 @@ run
 EOF
 }
 
+generate_filebrowser () {
+  cat > filebrowser.sh << EOF
+#!/usr/bin/env bash
+
+# 检测是否已运行
+check_run() {
+  [[ \$(pgrep -lafx filebrowser) ]] && echo "filebrowser 正在运行中" && exit
+}
+
+# 若 ftp argo 域名不设置，则不安装 filebrowser
+check_variable() {
+  [ -z "\${FTP_DOMAIN}" ] && exit
+}
+
+# 下载最新版本 filebrowser
+download_filebrowser() {
+  if [ ! -e filebrowser ]; then
+    URL=\$(wget -qO- "https://api.github.com/repos/filebrowser/filebrowser/releases/latest" | grep -o "https.*linux-amd64.*gz")
+    URL=\${URL:-https://github.com/filebrowser/filebrowser/releases/download/v2.23.0/linux-amd64-filebrowser.tar.gz}
+    wget -O filebrowser.tar.gz \${URL}
+    tar xzvf filebrowser.tar.gz filebrowser
+    rm -f filebrowser.tar.gz
+    chmod +x filebrowser
+  fi
+}
+
+# 运行 filebrowser 服务端
+run() {
+  PASSWORD_HASH=\$(./filebrowser hash \$WEB_PASSWORD)
+  [ -e filebrowser ] && nohup ./filebrowser --port 3333 --username \${WEB_USERNAME} --password "\${PASSWORD_HASH}" >/dev/null 2>&1 &
+}
+
+check_run
+check_variable
+download_filebrowser
+run
+EOF
+}
+
+# 由于 Glitch 用户空间只有 200MB，故每5秒自动删除垃圾文件
+generate_autodel() {
+  cat > auto_del.sh <<EOF
+while true; do
+  rm -rf /app/.git
+  sleep 5
+done
+EOF
+}
+
 generate_config
 generate_argo
 generate_nezha
 generate_ttyd
+generate_filebrowser
+generate_autodel
 
 [ -e nezha.sh ] && bash nezha.sh
 [ -e argo.sh ] && bash argo.sh
 [ -e ttyd.sh ] && bash ttyd.sh
+[ -e filebrowser.sh ] && bash filebrowser.sh
+[ -e auto_del.sh ] && bash auto_del.sh
